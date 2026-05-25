@@ -78,7 +78,7 @@ pub async fn get_discord_user(
     Path(id): Path<u64>,
     State(state): State<Arc<AppState>>,
 ) -> Json<DiscordUserObject> {
-    let client = state.create_discord_client();
+    let client: &reqwest::Client = state.get_discord_client();
     let url = format!("https://discord.com/api/v10/users/{}", id);
 
     let response = client
@@ -101,7 +101,7 @@ pub async fn get_discord_image(
     let user = get_discord_user(Path(id), State(Arc::clone(&state))).await;
     let avatar = user.avatar.clone();
 
-    let client = state.create_discord_client();
+    let client = state.get_discord_client();
 
     if avatar.is_none() {
         let index: u64 = match user.discriminator == "0" {
