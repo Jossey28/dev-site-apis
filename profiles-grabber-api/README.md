@@ -26,6 +26,9 @@ GET /api/{endpoint}/{endpoint id}/{supported item}/{optional parameters}
 
 Discord ( profile picture, online activity, online status)
 
-Youtube ( profile picture, last watched, pinned videos, must watch)
+Youtube ( profile picture, must watch)
 
-Hackatime ( profile picture,project most worked on, hours within day, hours total)
+*`last watched` isn't possible given youtube's API structure* :(
+
+
+Hackatime ( profile picture, project most worked on, hours within day, hours total)

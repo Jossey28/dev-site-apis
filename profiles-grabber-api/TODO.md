@@ -20,6 +20,7 @@
 
 - [ ] Implement a Discord activity tracker
 - [ ] Implement a Discord status tracker
+- [ ] Get Server tag and maybe badge from Discord
 
 ### Documentation
 

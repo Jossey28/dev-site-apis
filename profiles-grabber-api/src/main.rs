@@ -1,29 +1,33 @@
-use std::{env, fmt::Display, sync::Arc};
+pub mod discord_api;
+
+use std::{env, sync::Arc};
 
 use axum::{
-    Json,
-    body::Body,
-    extract::{Path, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE},
+    extract::{Path, Query, State},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
-use reqwest::header::AUTHORIZATION;
-use serde::{Deserialize, Serialize};
-use serde_with::{DisplayFromStr, serde_as};
+use reqwest::{Client, header::AUTHORIZATION};
 use tokio::net::TcpListener;
-use utoipa::ToSchema;
+use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 use utoipa_swagger_ui::SwaggerUi;
 
-#[derive(Clone, Debug)]
-struct AppState {
-    reqwest_client: reqwest::Client,
+pub struct AppState {
+    #[allow(dead_code)]
+    reqwest_client: Option<reqwest::Client>,
 }
 
 impl AppState {
-    fn new() -> Self {
+    pub fn new() -> Self {
+        Self {
+            reqwest_client: None,
+        }
+    }
+
+    pub fn create_discord_client(&self) {
         let token = env::var("DISCORD_BOT_TOKEN").expect("Token Not Found");
-        let auth_str = format!("Bot {}", token);
+        let auth_str: String = format!("Bot {}", token);
 
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&auth_str).unwrap());
@@ -31,148 +35,81 @@ impl AppState {
         let client = reqwest::Client::builder()
             .default_headers(headers)
             .build()
-            .expect("Failed to create client");
+            .expect("Failed to create client for discord");
 
-        Self {
-            reqwest_client: client,
+        client
+    }
+
+    pub fn get_youtube_apikey(&self) -> Option<String> {
+        match env::var("YOUTUBE_PUBLIC_APIKEY") {
+            Ok(key) => Some(key),
+            Err(err) => {
+                println!("Unable to init youtube apikey. Error {}", err);
+                None
+            }
         }
     }
 }
 
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct Snowflake(#[serde_as(as = "DisplayFromStr")] pub u64);
-impl Display for Snowflake {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
+#[derive(Debug, serde::Deserialize,IntoParams)]
+struct YoutubePlaylistParameters {
+    #[allow(dead_code)]
+    pub video_amount: Option<i32>,
 }
 
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct DiscordUserObject {
-    // Group the important information up here
-    pub id: Snowflake,
-    pub username: String,
-    pub discriminator: String,
-    pub global_name: Option<String>,
-    pub avatar: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub primary_guild: Option<Option<UserPrimaryGuild>>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub premium_type: Option<PremiumType>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(try_from = "u8")]
-pub enum PremiumType {
-    None = 0,
-    NitroClassic = 1,
-    Nitro = 2,
-    NitroBasic = 3,
-}
-
-impl TryFrom<u8> for PremiumType {
-    // https://doc.rust-lang.org/rust-by-example/conversion/try_from_try_into.html
-    type Error = String;
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Self::None),
-            1 => Ok(Self::NitroClassic),
-            2 => Ok(Self::Nitro),
-            3 => Ok(Self::NitroBasic),
-            _ => Err(format!("Unknown PremiumType: {}", value)),
-        }
-    }
-}
-
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct UserPrimaryGuild {
-    pub identity_guild_id: Option<Snowflake>,
-    pub identity_enabled: Option<bool>,
-    pub tag: Option<String>,
-    pub badge: Option<String>,
-}
-
-#[utoipa::path(get, path = "/api/discord/{id}/user", responses((status = OK, body=DiscordUserObject)))]
-async fn get_discord_user(
-    Path(id): Path<u64>,
+#[utoipa::path(get, path = "/api/youtube/playlist/{id}", params(YoutubePlaylistParameters), responses((status = OK, body=str)))]
+async fn get_youtube_playlist(
+    Path(id): Path<String>,
+    Query(params): Query<YoutubePlaylistParameters>,
     State(state): State<Arc<AppState>>,
-) -> Json<DiscordUserObject> {
-    let client = &state.reqwest_client;
-    let url = format!("https://discord.com/api/v10/users/{}", id);
+) -> Response {
+    let api_key = state.get_youtube_apikey();
+    if let None = api_key {
+        return (StatusCode::IM_A_TEAPOT, "Youtube API Key not Configured").into_response();
+    };
 
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .expect("Failed to send request")
-        .json::<DiscordUserObject>()
-        .await
-        .expect("Failed to convert to json");
+    let api_key = api_key.unwrap();
 
-    Json(response)
-}
+    let video_amount = match params.video_amount {
+        Some(val) => val,
+        None => 3,
+    };
 
-#[utoipa::path(get, path = "/api/discord/{id}/image", responses((status = OK, body=str)))]
-async fn get_discord_image(Path(id): Path<u64>, State(state): State<Arc<AppState>>) -> Response {
-    let user = get_discord_user(Path(id), State(state.clone())).await;
-    let avatar = user.avatar.clone();
+    let video_amount = video_amount.clamp(0, 50);
 
-    let client = &state.reqwest_client;
+    let url = format!(
+        "https://www.googleapis.com/youtube/v3/playlists?part=snippet&id={}&key={}&maxResults={}",
+        id, api_key, video_amount
+    );
 
-    if avatar.is_none() {
-        let index: u64 = match user.discriminator == "0" {
-            true => (user.id.clone().0 >> 22) % 6,
-            false => user.discriminator.parse().expect("Unable to parse string "),
-        };
+    let api_response = Client::new();
 
-        let url = format!("https://cdn.discordapp.com/embed/avatars/{}.png", index);
 
-        let response = client.get(&url).send().await.unwrap();
-        let image_data = response.bytes().await.unwrap();
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_TYPE, "image/png")
-            .body(Body::from(image_data))
-            .unwrap()
-            .into_response()
-    } else {
-        let avatar = avatar.unwrap();
-
-        let url = format!(
-            "https://cdn.discordapp.com/avatars/{}/{}.png",
-            user.id, avatar
-        );
-        let response = client.get(&url).send().await.unwrap();
-        let image_data = response.bytes().await.unwrap();
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_TYPE, "image/png")
-            .body(Body::from(image_data))
-            .unwrap()
-            .into_response()
-    }
+    return "hi".into_response();
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
+    let host = "127.0.0.1";
+    let port = "8080";
+
     let shared_app_state = Arc::new(AppState::new());
 
     let (router, api) = OpenApiRouter::new()
-        .routes(routes!(get_discord_user))
-        .routes(routes!(get_discord_image))
+        .routes(routes!(crate::discord_api::get_discord_image))
+        .routes(routes!(crate::discord_api::get_discord_user))
+        .routes(routes!(get_youtube_playlist))
         .with_state(shared_app_state)
         .split_for_parts();
 
     let app = router.merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", api));
 
-    let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
+    let listener = TcpListener::bind(format!("{}:{}", host, port))
+        .await
+        .unwrap();
+    println!("listening on http://{}/{}", host, port);
     axum::serve(listener, app).await.unwrap();
 
     Ok(())
